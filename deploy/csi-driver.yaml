@@ -1,0 +1,9 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: caa-csi-block.csi.confidentialcontainers.io
+spec:
+  attachRequired: false
+  podInfoOnMount: false
+  volumeLifecycleModes:
+    - Persistent
