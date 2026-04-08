@@ -11,13 +11,14 @@ import (
 	"sync"
 )
 
-const volumeStoreDir = "/var/lib/caa-csi-block/volumes"
+const defaultVolumeStoreDir = "/var/lib/caa-csi-block/volumes"
 
 type volumeRecord struct {
-	VolumeID string            `json:"volumeID"`
-	Provider string            `json:"provider"`
-	Path     string            `json:"path"`
-	Params   map[string]string `json:"params"`
+	VolumeID      string            `json:"volumeID"`
+	Provider      string            `json:"provider"`
+	Path          string            `json:"path"`
+	CapacityBytes int64             `json:"capacityBytes,omitempty"`
+	Params        map[string]string `json:"params"`
 }
 
 type volumeStore struct {
@@ -26,8 +27,19 @@ type volumeStore struct {
 }
 
 func newVolumeStore() *volumeStore {
-	os.MkdirAll(volumeStoreDir, 0700)
-	return &volumeStore{dir: volumeStoreDir}
+	dir := os.Getenv("CSI_VOLUME_STORE_DIR")
+	if dir == "" {
+		dir = defaultVolumeStoreDir
+	}
+	os.MkdirAll(dir, 0700)
+	return &volumeStore{dir: dir}
+}
+
+func (vs *volumeStore) Exists(volumeID string) bool {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	_, err := os.Stat(filepath.Join(vs.dir, volumeID+".json"))
+	return err == nil
 }
 
 func (vs *volumeStore) Save(rec *volumeRecord) error {

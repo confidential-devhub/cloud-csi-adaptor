@@ -22,9 +22,16 @@ import (
 var nsLogger = log.New(log.Writer(), "[caa-csi/node] ", log.LstdFlags|log.Lmsgprefix)
 
 const (
-	kataDirectVolumeRootPath = "/run/kata-containers/shared/direct-volumes"
-	mountInfoFileName        = "mountInfo.json"
+	defaultKataDirectVolumeRootPath = "/run/kata-containers/shared/direct-volumes"
+	mountInfoFileName               = "mountInfo.json"
 )
+
+func getKataDirectVolumeRootPath() string {
+	if p := os.Getenv("KATA_DIRECT_VOLUME_ROOT_PATH"); p != "" {
+		return p
+	}
+	return defaultKataDirectVolumeRootPath
+}
 
 type mountInfoJSON struct {
 	VolumeType string            `json:"volume-type"`
@@ -52,6 +59,12 @@ func (ns *nodeServer) NodeStageVolume(_ context.Context, req *csi.NodeStageVolum
 	volumeID := req.GetVolumeId()
 	if volumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing")
+	}
+	if req.GetStagingTargetPath() == "" {
+		return nil, status.Error(codes.InvalidArgument, "Staging target path missing")
+	}
+	if req.GetVolumeCapability() == nil {
+		return nil, status.Error(codes.InvalidArgument, "Volume capability missing")
 	}
 
 	ns.mu.Lock()
@@ -93,6 +106,9 @@ func (ns *nodeServer) NodePublishVolume(_ context.Context, req *csi.NodePublishV
 	if targetPath == "" {
 		return nil, status.Error(codes.InvalidArgument, "Target path missing")
 	}
+	if req.GetVolumeCapability() == nil {
+		return nil, status.Error(codes.InvalidArgument, "Volume capability missing")
+	}
 
 	ns.mu.Lock()
 	devicePath := ns.devices[volumeID]
@@ -124,8 +140,7 @@ func (ns *nodeServer) NodePublishVolume(_ context.Context, req *csi.NodePublishV
 		return nil, status.Errorf(codes.Internal, "failed to marshal mountInfo: %v", err)
 	}
 
-	// Write to kata shared direct-volumes directory (base64-encoded target path)
-	volumeDir := filepath.Join(kataDirectVolumeRootPath, b64.URLEncoding.EncodeToString([]byte(targetPath)))
+	volumeDir := filepath.Join(getKataDirectVolumeRootPath(), b64.URLEncoding.EncodeToString([]byte(targetPath)))
 	if err := os.MkdirAll(volumeDir, 0700); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to create kata direct volume dir %s: %v", volumeDir, err)
 	}
@@ -150,8 +165,7 @@ func (ns *nodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpubl
 		return nil, status.Error(codes.InvalidArgument, "Target path missing")
 	}
 
-	// Clean up kata shared direct-volumes directory
-	volumeDir := filepath.Join(kataDirectVolumeRootPath, b64.URLEncoding.EncodeToString([]byte(targetPath)))
+	volumeDir := filepath.Join(getKataDirectVolumeRootPath(), b64.URLEncoding.EncodeToString([]byte(targetPath)))
 	os.RemoveAll(volumeDir)
 
 	// Clean up target path
@@ -165,6 +179,9 @@ func (ns *nodeServer) NodeUnstageVolume(_ context.Context, req *csi.NodeUnstageV
 	volumeID := req.GetVolumeId()
 	if volumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing")
+	}
+	if req.GetStagingTargetPath() == "" {
+		return nil, status.Error(codes.InvalidArgument, "Staging target path missing")
 	}
 
 	ns.mu.Lock()

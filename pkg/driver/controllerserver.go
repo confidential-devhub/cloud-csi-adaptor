@@ -31,11 +31,21 @@ func (cs *controllerServer) CreateVolume(_ context.Context, req *csi.CreateVolum
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "Volume name missing")
 	}
+	if len(req.GetVolumeCapabilities()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume capabilities missing")
+	}
 
 	params := req.GetParameters()
 	capacity := req.GetCapacityRange().GetRequiredBytes()
 	if capacity == 0 {
 		capacity = 1073741824 // default 1 GiB
+	}
+
+	if rec, err := cs.store.Load(req.GetName()); err == nil {
+		if rec.CapacityBytes != 0 && rec.CapacityBytes != capacity {
+			return nil, status.Errorf(codes.AlreadyExists,
+				"volume %s already exists with different capacity (%d != %d)", req.GetName(), rec.CapacityBytes, capacity)
+		}
 	}
 
 	p, err := provider.NewBlockVolumeProvider(params)
@@ -49,10 +59,11 @@ func (cs *controllerServer) CreateVolume(_ context.Context, req *csi.CreateVolum
 	}
 
 	cs.store.Save(&volumeRecord{
-		VolumeID: req.GetName(),
-		Provider: volInfo.Provider,
-		Path:     volInfo.Path,
-		Params:   params,
+		VolumeID:      req.GetName(),
+		Provider:      volInfo.Provider,
+		Path:          volInfo.Path,
+		CapacityBytes: capacity,
+		Params:        params,
 	})
 	csLogger.Printf("CreateVolume: %s (provider=%s, path=%s)", req.GetName(), volInfo.Provider, volInfo.Path)
 
@@ -121,6 +132,10 @@ func (cs *controllerServer) ValidateVolumeCapabilities(_ context.Context, req *c
 	}
 	if req.GetVolumeCapabilities() == nil {
 		return nil, status.Error(codes.InvalidArgument, "Volume capabilities missing")
+	}
+
+	if !cs.store.Exists(req.GetVolumeId()) {
+		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
 	}
 
 	return &csi.ValidateVolumeCapabilitiesResponse{
