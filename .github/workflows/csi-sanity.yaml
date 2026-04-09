@@ -1,0 +1,120 @@
+name: CSI Sanity Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  csi-sanity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build driver
+        run: go build -ldflags "-X main.version=test" -o csi-driver ./cmd/
+
+      - name: Install csi-sanity
+        run: go install github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@v5.0.0
+
+      - name: Create test directories
+        run: |
+          mkdir -p /tmp/csi-test/pool /tmp/csi-test/volstore /tmp/csi-test/kata-vols
+
+      - name: Create test volume parameters
+        run: |
+          cat > /tmp/csi-test/params.yaml <<EOF
+          cloudProvider: libvirt
+          cloudProviderVolumePath: /tmp/csi-test/pool
+          EOF
+
+      - name: Create helper scripts
+        run: |
+          cat > /tmp/csi-test/create-path.sh <<'SCRIPT'
+          #!/bin/bash
+          dir=$(mktemp -d /tmp/csi-test-mnt-XXXXXX)
+          echo "$dir"
+          SCRIPT
+
+          cat > /tmp/csi-test/remove-path.sh <<'SCRIPT'
+          #!/bin/bash
+          target="$1"
+
+          if [ -z "$target" ] || [ "$target" = "/" ]; then
+            echo "refusing to remove unsafe path: '$target'" >&2
+            exit 1
+          fi
+
+          case "$target" in
+            /tmp/csi-test-mnt-*)
+              rm -rf -- "$target"
+              ;;
+            *)
+              echo "refusing to remove path outside expected test directory prefix: '$target'" >&2
+              exit 1
+              ;;
+          esac
+          SCRIPT
+
+          cat > /tmp/csi-test/check-path.sh <<'SCRIPT'
+          #!/bin/bash
+          if [ ! -e "$1" ]; then
+            echo "not_found"
+          elif [ -f "$1" ]; then
+            echo "file"
+          elif [ -d "$1" ]; then
+            echo "directory"
+          else
+            echo "other"
+          fi
+          SCRIPT
+
+          chmod +x /tmp/csi-test/*.sh
+
+      - name: Start CSI driver and run csi-sanity tests
+        run: |
+          set -eu
+
+          KATA_DIRECT_VOLUME_ROOT_PATH=/tmp/csi-test/kata-vols \
+          CSI_VOLUME_STORE_DIR=/tmp/csi-test/volstore \
+          ./csi-driver \
+            --endpoint=unix:///tmp/csi-test/csi.sock \
+            --drivername=caa-csi-block.csi.confidentialcontainers.io \
+            --nodeid=test-node &
+          driver_pid=$!
+
+          trap 'kill "$driver_pid" 2>/dev/null || true; wait "$driver_pid" 2>/dev/null || true' EXIT
+
+          timeout_secs=30
+          elapsed=0
+          while [ ! -S /tmp/csi-test/csi.sock ]; do
+            if ! kill -0 "$driver_pid" 2>/dev/null; then
+              echo "CSI driver exited before creating socket"
+              wait "$driver_pid"
+            fi
+
+            if [ "$elapsed" -ge "$timeout_secs" ]; then
+              echo "Timed out waiting for CSI socket"
+              exit 1
+            fi
+
+            sleep 1
+            elapsed=$((elapsed + 1))
+          done
+
+          $(go env GOPATH)/bin/csi-sanity \
+            --csi.endpoint=unix:///tmp/csi-test/csi.sock \
+            --csi.testvolumeparameters=/tmp/csi-test/params.yaml \
+            --csi.createstagingpathcmd="/tmp/csi-test/create-path.sh" \
+            --csi.removestagingpathcmd="/tmp/csi-test/remove-path.sh" \
+            --csi.createmountpathcmd="/tmp/csi-test/create-path.sh" \
+            --csi.removemountpathcmd="/tmp/csi-test/remove-path.sh" \
+            --csi.checkpathcmd="/tmp/csi-test/check-path.sh" \
+            --ginkgo.skip="Snapshot|ListVolumes|GetCapacity|ControllerPublishVolume|ControllerUnpublishVolume|ExpandVolume|NodeExpandVolume|NodeGetVolumeStats|ModifyVolume|GroupController|volume from an existing source" \
+            --ginkgo.v
